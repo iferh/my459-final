@@ -1,0 +1,592 @@
+---
+title: "MY459 Final Project"
+author: "Ignacio Fernandez"
+output:
+  html_document:
+    df_print: paged
+---
+
+## 1. Importing packages and data
+
+### Importing packages
+```{r, message=FALSE, warning=FALSE}
+library("quanteda", quietly = TRUE, warn.conflicts = FALSE, verbose = FALSE)
+library("topicmodels")
+library("readr")
+library("dplyr")
+library("stringr")
+library("cld3")
+library("ggplot2")
+library("cowplot")
+library("tidytext")
+library("LDAvis")
+```
+
+## Importing data
+All data was collected from Metacritic.com, limited to video games. It was collected from Metacritic's Best Games of All Times.
+There is general game information for 3438 games (5000 counting diff platforms). Game Metadata has repeated titles for different platforms.
+There are 283,983 comments for 2325 games. There's no date variable available
+```{r, warning=FALSE, eval=FALSE}
+#------------------------------------------------------------------------------
+## Importing data
+#------------------------------------------------------------------------------
+# Read data
+revpath <- "./Videogame_Reviews_Datasets/kaggle_Metacritic_Video_Game_Comments/metacritic_game_user_comments.csv"
+infpath <- "./Videogame_Reviews_Datasets/kaggle_Metacritic_Video_Game_Comments/metacritic_game_info.csv"
+metac <- read_csv(revpath)
+ginfo <- read_csv(infpath)
+rm(revpath,infpath)
+```
+
+
+## 2. Pre-processing data
+
+### Initial cleaning of data
+```{r, eval=FALSE}
+## Rename variables for data
+metac$X1 <- NULL
+metac$Username <- NULL
+names(metac) <- tolower(names(metac))
+
+## Rename variables for metadata
+ginfo$X1 <- NULL
+names(ginfo) <- tolower(names(ginfo))
+
+## Remove observations without title from data
+metac <- metac[complete.cases(metac$title), ]
+
+## Remove non English comments
+## Detect Language
+#comm_lang <- detect_language(metac$comment)
+### Save Object
+#saveRDS(comm_lang, file = "R_objects/comments_language.RDS")
+
+### Load Object
+comm_lang <- readRDS("R_objects/comments_language.RDS")
+metac$comm_lang <- comm_lang
+## Remove other languages
+metac <- metac[metac$comm_lang == "en",]
+metac$comm_lang <- NULL
+rm(comm_lang)
+
+## Remove observations with empty comments from data
+## Based on count number of rows with 0 tokens in comments
+### Because there are cases with Unicode Character U+200C
+metac <- metac[ntoken(metac$comment)!=0,]
+
+## Subset game information metadata by games in comments
+ginfo <- ginfo[ginfo$title %in% unique(metac$title),]
+
+## Process game metadata
+## Change game info scores to numeric
+ginfo$metascore <- as.numeric(ginfo$metascore)
+ginfo$avg_userscore <- as.numeric(ginfo$avg_userscore)
+
+## Make simplified metadata (merging games by title ignoring platform)
+games <- ginfo %>% 
+  group_by(title) %>%
+  summarize(year = min(year),
+            publisher = publisher[which.max(nchar(publisher))],
+            genre = genre[which.max(nchar(genre))],
+            metascore = mean(metascore, na.rm = TRUE),
+            userscore = mean(avg_userscore, na.rm = TRUE))
+
+## Calculate number of comments per game
+games_com <- metac %>%
+  group_by(title) %>%
+  summarise(n = n())
+games$n_comm <- games_com$n
+games$p_comm <- games_com$prop
+rm(games_com)
+```
+
+### Make genre variables
+```{r, eval=FALSE}
+## Make comprehensive game genre categories
+games$gen1 <- "Miscellaneous"
+games$gen1[grep("Action", games$genre)] <- "Action"
+games$gen1[grep("Adventure", games$genre)] <- "Adventure"
+games$gen1[grep("Action Adventure", games$genre)] <- "Action Adventure"
+games$gen1[grep("Simulation|Virtual Life", games$genre)] <- "Simulation"
+games$gen1[grep("Strategy", games$genre)] <- "Strategy"
+games$gen1[grep("Sports", games$genre)] <- "Sports"
+games$gen1[grep("Role-Playing", games$genre)] <- "RPG"
+games$gen1[grep(c("Driving|Racing|Automobile"), games$genre)] <- "Racing"
+games$gen1[grep("Rhythm|Puzzle", games$genre)] <- "Puzzle & Rhythm"
+
+## Make genre 2 variable with sub-categories of action games
+games$gen2 <- games$gen1
+#games$gen2[grep("Puzzle", games$genre)] <- "Puzzle"
+#games$gen2[grep("Rhythm", games$genre)] <- "Rhythm"
+games$gen2[grep("Platform", games$genre)] <- "Platform"
+games$gen2[grep("Shooter", games$genre)] <- "Shooter"
+games$gen2[grep("Fighting|Wrestling", games$genre)] <- "Fighting"
+
+## Add categories to comment data
+metac$gen1 <- games$gen1[match(metac$title, games$title)]
+metac$gen2 <- games$gen2[match(metac$title, games$title)]
+```
+
+### Make genre dataframe
+```{r, eval=FALSE}
+## Count comments by genre
+genre <- count(metac, gen2)
+names(genre)[2] <- "n_comm"
+
+## Average number of tokens per comment by genre
+gen_avgtok <- aggregate(ntoken(mcorp_c), list(docvars(mcorp_c)$gen2), mean)
+genre$avg_toks <- gen_avgtok$x
+rm(gen_avgtok)
+
+## Average number of punctuation per comment by genre
+gen_avgpuct <- aggregate(
+  unlist(lapply(str_extract_all(texts(mcorp_c), "[[:punct:]]"), FUN=length)),
+  list(docvars(mcorp_c)$gen2), mean)["x"]
+genre$avg_punct <- gen_avgpuct$x
+rm(gen_avgpuct)
+```
+
+### Save objects
+```{r, eval=FALSE}
+saveRDS(ginfo, file = "R_objects/metacritic_gameinfo_complete_dataframe.RDS")
+saveRDS(games, file = "R_objects/metacritic_gameinfo_unique_dataframe.RDS")
+saveRDS(metac, file = "R_objects/metacritic_comments_complete_dataframe.RDS")
+saveRDS(genre, file = "R_objects/metacritic_genre_dataframe.RDS")
+```
+
+## 3. Summary statistics of data
+
+### Load Objects
+```{r}
+metac <- readRDS("R_objects/metacritic_comments_complete_dataframe.RDS")
+ginfo <- readRDS("R_objects/metacritic_gameinfo_complete_dataframe.RDS")
+games <- readRDS("R_objects/metacritic_gameinfo_unique_dataframe.RDS")
+genre <- readRDS("R_objects/metacritic_genre_dataframe.RDS")
+```
+
+### General description of data
+```{r}
+## Describing general data
+
+## number of unique games reviewed in comments
+length(unique(metac$title))
+
+## number of unique titles
+length(unique(ginfo$title))
+
+## Games with highest proportion of comments in data
+sort(round(prop.table(table(metac$title))*100,3), decreasing = TRUE)[1:10]
+
+## Describing Genres
+
+## Table with genres
+message("Number of titles by genre 2 and genre1 1")
+table(games$gen2, games$gen1)
+
+## See games in genre Miscellaneous
+# games[games$gen1=="Miscellaneous",]
+
+## Table of userscores vs genre
+round(prop.table(table(games$gen2[match(metac$title, games$title)], metac$userscore),1)*100,2)
+#round(prop.table(table(metac$gen2, metac$userscore),1)*100,2)
+```
+
+### Plots
+```{r}
+## Plot with the number of comments by game
+ggplot(metac, aes(x = platform, fill=gen2)) +
+  stat_count(position = "stack") +
+  ggtitle("Number of comments by platform") +
+  ylab("Number of comments") +
+  xlab("Gaming platform") +
+  labs(fill = "Game genre") +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.3, hjust = 1))
+
+## Plot with the number of comments by game genre
+plot1 <- ggplot(
+  genre, aes(y = reorder(gen2, n_comm), x = n_comm, fill=gen2)) +
+  geom_col(position = "stack", alpha=.6, width=.6) +
+  #ggtitle("Number of Comments by Game Genre") +
+  ylab(NULL) +
+  xlab("Number of comments") +
+  labs(fill = "Game genre") +
+  theme_bw() +
+  theme(legend.position="none")
+
+## Plot with the number of comments by game genre
+plot2 <- ggplot(
+  genre, aes(y = reorder(gen2, n_comm), x = avg_toks, fill=gen2)) +
+  geom_col(position = "stack", alpha=.6, width=.6) +
+  #coord_cartesian(xlim = c(100, 250)) +
+  #ggtitle("Average tokens for comment by Game Genre") +
+  ylab(NULL) +
+  xlab("Average number of tokens") +
+  labs(fill = "Game genre") +
+  theme_bw() +
+  theme(legend.position="none",
+        axis.text.y = element_blank(),
+        axis.ticks.y = element_blank())
+
+## Plot by grid
+plot_grid(plot1, plot2, ncol=2, rel_widths = c(4, 3))
+```
+
+
+## 4. Text Analysis Preprocessing
+
+### Create corpus and DFM
+```{r, eval=FALSE}
+## Create corpus
+mcorp_c <- corpus(metac, text_field = "comment")
+
+## Create DFM with all terms
+mcdfm_c <- dfm(mcorp_c,
+               tolower = TRUE,
+               stem = FALSE,
+               remove = stopwords("english"),
+               remove_url = TRUE,
+               remove_punct = TRUE,
+               remove_numbers = TRUE,
+               verbose = TRUE)
+
+## Save Objects
+saveRDS(mcorp_c, file = "R_objects/metacritic_comments_complete_corpus.RDS")
+saveRDS(mcdfm_c, file = "R_objects/metacritic_comments_complete_dfm.RDS")
+
+```
+
+### Cleaning data - keeping only nouns
+```{r, eval=FALSE}
+## Solution to detect nouns from:
+## https://stackoverflow.com/questions/45857121/
+
+#library("spacyr")
+#spacy_install()
+
+## Use spacyr to identify nouns
+#spacy_initialize()
+#comm_parsed <- spacy_parse(mcorp_c, tag = TRUE, pos = TRUE)
+
+## Save Object
+#saveRDS(comm_parsed, file = "R_objects/comments_parsed.RDS")
+
+## Load Object
+comm_parsed <- readRDS("R_objects/comments_parsed.RDS")
+
+## Make data frame in which text variable has nouns only
+mnoun <- comm_parsed %>%
+  subset(subset=(pos == "NOUN" | pos == "PROPN"), select = c(doc_id, token)) %>%
+  group_by(doc_id) %>%
+  mutate(text = paste(token, collapse = " "))
+mnoun$token <- NULL
+mnoun <- mnoun[!duplicated(mnoun$doc_id),]
+
+## Select variables to keep 
+varskeep <- c("doc_id","title", "platform", "userscore", "gen1", "gen2", "comment")
+
+## Make doc_id variable for metacritic data
+metac$doc_id <- paste0("text", 1:nrow(metac))
+metac <- metac[varskeep]
+
+## Add variables to only noun data
+varskeep <- varskeep[1:6]
+mnoun[,varskeep] <- metac[metac$doc_id %in% mnoun$doc_id, varskeep]
+
+## Remove object
+rm(comm_parsed)
+
+## Save Object
+saveRDS(mnoun, file = "R_objects/metacritic_comments_nouns_dataframe.RDS") 
+```
+
+### Create new corpus and DFM with nouns only
+```{r, eval=FALSE}
+# Create corpus
+mcorp_n <- corpus(mnoun, text_field = "text")
+
+## Create DFM with all terms
+mcdfm_n <- dfm(mcorp_n,
+               tolower = TRUE,
+               stem = TRUE,
+               remove = stopwords("english"),
+               remove_url = TRUE,
+               remove_punct = TRUE,
+               remove_numbers = TRUE,
+               verbose = TRUE)
+```
+
+### Describe and clean noun only DFM
+```{r, eval=FALSE}
+## Look at top features
+topfeatures(mcdfm_n, 15)
+
+## Remove most common word "game"
+mcdfm_n <- dfm_remove(mcdfm_n, pattern = "game", valuetype = "fixed")
+
+## See Wordcloud
+textplot_wordcloud(mcdfm_n, rotation=0, min_size=.75, max_size=3, max_words=50)
+
+## Trim DFM removing words that appear fewer than 3 times
+dfm_trim(mcdfm_n, min_termfreq = 3, termfreq_type = c("count"),
+  verbose = quanteda_options("verbose"))
+
+## Count number of rows with 0 tokens
+nrow(mcdfm_n[ntoken(mcdfm_n)==0,])
+
+## Subset dfm removing docs without entries
+mcdfm_n <- dfm_subset(mcdfm_n, ntoken(mcdfm_n) > 0)
+
+## Save Objects
+saveRDS(mcorp_n, file = "R_objects/metacritic_comments_nouns_corpus.RDS")
+saveRDS(mcdfm_n, file = "R_objects/metacritic_comments_nouns_dfm.RDS")
+```
+
+
+## 5. Text Analysis: Complexity of comments
+
+### Load Objects
+```{r}
+mnoun <- readRDS("R_objects/metacritic_comments_nouns_dataframe.RDS")
+mcorp_c <- readRDS("R_objects/metacritic_comments_complete_corpus.RDS")
+mcdfm_c <- readRDS("R_objects/metacritic_comments_complete_dfm.RDS")
+mcorp_n <- readRDS("R_objects/metacritic_comments_nouns_corpus.RDS")
+mcdfm_n <- readRDS("R_objects/metacritic_comments_nouns_dfm.RDS")
+```
+
+### Estimate complexity
+```{r, eval=FALSE}
+# Estimate lexical diversity 
+mlexd <- textstat_lexdiv(dfm(mcorp_c), measure = c("TTR", "R"),
+                         remove_hyphens = TRUE)
+
+# Estimate average readability
+mread <- textstat_readability(mcorp_c,
+                              measure = c("Flesch", "Flesch.Kincaid"))
+
+## Average lexical diversity by genre
+genre <- bind_cols(genre, aggregate(mlexd[,2:3], by=list(docvars(mcorp_c)$gen2),
+                                    FUN=mean)[c("TTR","R")])
+
+## Average readability by genre
+genre <- bind_cols(genre, aggregate(mread[,2:3], by=list(docvars(mcorp_c)$gen2),
+                         FUN=mean)[c("Flesch", "Flesch.Kincaid")])
+
+## Remove objects
+rm(mread, mlexd)
+```
+
+### Plot average complexity by game genre
+```{r}
+## Make plot with the average readability by game genre
+plot3 <- ggplot(
+  genre, aes(y = reorder(gen2, -Flesch), x = Flesch, fill=gen2)) +
+  geom_col(position = "stack", alpha=.6, width=.6) +
+  coord_cartesian(xlim = c(40, 70)) +
+  #ggtitle("Average complexity of comments by Game Genre") +
+  ylab(NULL) +
+  xlab("Flesch Kincaid readibility index") +
+  theme_bw() +
+  theme(legend.position="none")
+
+## Make plot with the average lexical complexity by game genre
+plot4 <- ggplot(
+  genre, aes(y = reorder(gen2, -Flesch), x = R, fill=gen2)) +
+  geom_col(position = "stack", alpha=.6, width=.6) +
+  coord_cartesian(xlim = c(4, 7)) +
+  #ggtitle("") +
+  ylab(NULL) +
+  xlab("R (Guiraud's Root TTR)") +
+  theme_bw() +
+  theme(legend.position="none",
+        axis.text.y = element_blank(),
+        axis.ticks.y = element_blank())
+
+## Plot as grid
+plot_grid(plot3, plot4, ncol=2, rel_widths = c(4, 3))
+```
+
+## 6. Text Analysis: Sentiment Analysis
+
+### Calculate sentiment score
+```{r, eval=FALSE}
+## Load dict data
+negpath <- "./Sentiment_analysis/opinion-lexicon-English/negative-words.txt"
+pospath <- "./Sentiment_analysis/opinion-lexicon-English/positive-words.txt"
+posword <- read_lines(pospath,skip = 30)
+negword <- read_lines(negpath,skip = 31)
+
+## Make dictionary
+sentiment_dict <- dictionary(list(positive = posword,
+                                  negative = negword))
+
+# Calculate sentiment on DFM weighted by proportion
+senti <- mcorp_c %>%
+  dfm(tolower = TRUE) %>%
+  dfm_weight(scheme = "prop") %>%
+  dfm_lookup(dictionary = sentiment_dict)
+
+## Save Object
+saveRDS(senti, file = "R_objects/metacritic_comments_sentiment.RDS")
+```
+
+
+## 7. Topic Model: Fit LDA
+
+### Estimate the number of topics based on log likelihood
+```{r, eval=FALSE}
+k_seq <- seq(3, 15, by=1)
+loglike <- NA
+i <- 1
+
+for (K in k_seq){
+  temp_lda <- LDA(mcdfm_n, k = K, method = "Gibbs",
+                  control = list(seed = 123,
+                                 burnin = 100,
+                                 iter = 100))
+  loglike[i] <- temp_lda@loglikelihood
+  saveRDS(temp_lda, file = paste0("R_objects/test_lda_k", K)) 
+  i <- i + 1
+}
+
+## Save Object
+saveRDS(loglike, file = "R_objects/test_loglikelihood_k.RDS") 
+
+```
+
+### Plot log likelihood by K
+```{r}
+## Sequence
+k_seq <- seq(3, 15, by=1)
+
+## Load Object
+loglike <- readRDS("R_objects/test_loglikelihood_k.RDS")
+
+## Plot likelihood by K
+plot(k_seq, loglike[1:length(k_seq)], type = "b")
+rm(k_seq)
+```
+
+### Fit Topic Model K=7 with DFM without nouns
+```{r, eval=FALSE}
+## Run LDA model with K topics
+K <- 7
+mclda_n <- LDA(mc_dfm, k = K, method = "Gibbs",
+              control = list(verbose = 200L,
+                             seed = 1234,
+                             burnin = 100,
+                             iter = 500))
+
+## Save Object
+saveRDS(mclda_n, file = "R_objects/metacritic_comments_nouns_lda.RDS") 
+```
+
+
+## 8. Topic Model: Description of fitted model
+
+### Load LDA Object
+```{r}
+mclda_n <- readRDS("R_objects/metacritic_comments_nouns_lda.RDS")
+```
+
+### See words more associated with each topic
+```{r}
+# Look at the words most associated with each topic
+K <- 7
+top_words1 <- get_terms(mclda_n, 18)
+for (i in 1:K) {
+  message(paste("Topic", i))
+  print(paste(top_words1[,i], collapse=", "))}
+
+```
+
+```{r}
+## Code for plot taken from:
+## https://cfss.uchicago.edu/notes/topic-modeling/
+
+## Make tidy object of LDA
+mclda_td <- tidy(mclda_n)
+
+## Extract top terms by topic
+top_terms <- mclda_td %>%
+  group_by(topic) %>%
+  top_n(12, beta) %>%
+  ungroup() %>%
+  arrange(topic, -beta)
+
+## Plot top terms with beta by topic
+top_terms %>%
+  mutate(topic = factor(topic),
+         term = reorder_within(term, beta, topic)) %>%
+  ggplot(aes(term, beta, fill = topic)) +
+    geom_bar(alpha = 0.6, stat = "identity", show.legend = FALSE) +
+    scale_x_reordered() +
+    facet_wrap(~ topic, scales = "free", ncol = 4) +
+    #ggtitle("Betas of top terms by Topic") +
+    ylab(NULL) +
+    xlab(NULL) +
+    coord_flip()
+```
+
+### Make Intertopic Distance Map unsing LDAvis
+```{r, eval=FALSE}
+## Get prameters
+theta <- mclda_n@gamma
+phi <- posterior(mclda_n)$terms %>% as.matrix
+doc.length <- unname(ntoken(mcdfm_n))
+term.frequency <- unname(featfreq(mcdfm_n))
+vocab <- mclda_n@terms
+
+## Make json object
+json <- createJSON(phi = phi,
+                   theta = theta,
+                   doc.length = doc.length,
+                   term.frequency = term.frequency,
+                   vocab = vocab)
+
+## See maps in browser
+serVis(json)
+```
+
+
+## 9. Topic Model: Analysis of fitted model
+
+### Load Objects
+```{r}
+senti <- readRDS("R_objects/metacritic_comments_sentiment.RDS")
+```
+
+### Extract data by topic
+```{r}
+## Extract topic association per doc
+mc_theta <- mclda_n@gamma
+colnames(mc_theta) <- paste("topic", seq(1:7), sep = "_")
+
+## Make topic Dataframe
+## subset data frame to number of rows not dropped
+topicdfm <- mnoun[mnoun$doc_id %in% mclda_n@documents,]
+
+## Add most likely topic variable to data frame
+topicdfm$top_topic <- colnames(mc_theta)[apply(mc_theta, MARGIN=1, which.max)]
+## Add likelyhood by topic to data frame
+topicdfm <- bind_cols(topicdfm, data.frame(mc_theta))
+
+## Add sentiment data to dataframe
+topicdfm <- bind_cols(topicdfm, 
+                      convert(senti[docnames(senti) %in% mclda_n@documents,],
+                              to = 'data.frame')[,2:3])
+topicdfm$sentiment <- topicdfm$positive - topicdfm$negative
+```
+
+### Describe data
+```{r}
+## Average sentiment
+topicdfm %>% group_by(top_topic) %>% summarise_at("sentiment", funs(mean, sd))
+## Average userscore
+topicdfm %>% group_by(top_topic) %>% summarise_at("userscore", funs(mean, sd))
+## Distribution of comments per topic
+table(topicdfm$top_topic)/nrow(topicdfm)
+## Distribution of comments per topic and genre
+prop.table(table(topicdfm$gen2, topicdfm$top_topic),1)
+```
+
