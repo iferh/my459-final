@@ -4,4 +4,4 @@ The goal of the project was to apply quantitative text analysis techniques to an
 The pre-processing and analysis was done in R.
 
 ## Data Source
-The data used in the study was obtained from the Kaggle website as a publicly  available database that contains information collected from Metacritic.com
+The data used in the study was collected from the sub-section Best Games of All Time from Metacritic.com and consisted of 283,983 user comments for 2,325 different video game titles from multiple platforms.
